@@ -1,0 +1,310 @@
+---
+title: "Predicting Wine Province"
+output: html_document
+---
+
+```{r Setup 1, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+## Setup
+
+```{r Setup 2}
+# add your libraries
+library(tidyverse)
+library(caret)
+library(naivebayes)
+library(tidytext)
+library(knitr)
+library(fastDummies)
+wine<- read_rds("~/Desktop/Data Analysis/Machine Learning/Data/pinot.rds") %>% 
+  select(-taster_name) %>% mutate(id=row_number())# no leakage!
+
+```
+
+
+## Feature Engineering
+
+```{r Feature Engineering}
+  
+
+## create a function that finds words that appear x amount of times in the description
+wine_words <- function(df, j = 1000, stem=F){
+
+library(tidytext)
+library(SnowballC)
+data(stop_words)
+
+words <- df %>%
+  select(id, description) %>%
+  unnest_tokens(word, description) %>% # seperate description into words
+  anti_join(stop_words) %>% # get rid of stop words
+  filter(!(word %in% c("wine","pinot","vineyard")))
+    if(stem){
+      words <- words %>%
+        mutate(word = wordStem(word))
+    } # create stem argument
+    words <- words %>%
+      count(id, word) %>%
+      group_by(id) %>%
+      mutate(exists = (n>0)) %>%
+      ungroup %>%
+      group_by(word) %>%
+      mutate(total = sum(n)) %>%
+      filter(total > j) %>%
+      pivot_wider(id_cols = id, names_from = word, values_from = exists, values_fill = F) %>%
+      right_join(select(df,id,province)) %>%
+      mutate(across(-province, ~replace_na(.x, F)))
+
+}
+## join words data to original data set
+words <- wine_words(wine, j=500, stem= T) #Running wine words
+
+wine<-wine%>%
+  full_join(words, by = c("id", "province"))#Joining it back so we can get use the other columns
+
+## create dummy variables for year 
+wine <- wine %>% 
+  mutate(year_f = as.factor(year)) %>%
+  dummy_cols(
+select_columns = c("year_f"),
+remove_most_frequent_dummy = T,
+remove_selected_columns = T)
+
+##Binning Price and points and then dummying
+wine<- wine %>%
+  mutate(new_price = price,new_points=points)
+  
+wine$new_price <- as.numeric(cut_number(wine$new_price,10))#Binning price to 10 equal groups
+
+wine$new_points <- as.numeric(cut_number(wine$new_points,10))#Binning points to 10 equal groups
+
+#Making dummies of those new factors
+wine<-wine%>%
+  mutate(new_points = as.factor(new_points)) %>%
+  dummy_cols(
+    select_columns = c("new_points"),
+    remove_most_frequent_dummy = T,
+    remove_selected_columns = T)
+
+wine<-wine%>%
+  mutate(new_price = as.factor(new_price)) %>%
+  dummy_cols(
+    select_columns = c("new_price"),
+    remove_most_frequent_dummy = T,
+    remove_selected_columns = T) 
+
+wine = wine %>% select(-c(price, points, year, id, description))
+wine$province = as.factor(wine$province)
+
+```
+
+## Model with top words regardless of province
+
+```{r KNN Model}
+## split the data
+wine_index <- createDataPartition(wine$province, p = 0.7, list = FALSE)
+train <- wine[wine_index, ]
+test <- wine[-wine_index, ]
+
+control <-trainControl(method = "boot")
+
+
+## tuning parameters - KNN model w/ weights
+set.seed(3)
+fit_kitchen_sink <-train(province~.,
+            data = train,
+            method = "knn")
+
+# model may perform better with weight for minority classes
+confusionMatrix(predict(fit_kitchen_sink, test),factor(test$province))
+
+# Accuracy: 82.12 %
+# Kappa : .72
+
+# The model does well at predicting the three majority classes in the data set. However, it isn't well suited for predicting wines from Casablanca Valley, Marlborough, and New_York
+# Can this be improved by utilizing top words from minority provinces
+```
+
+## Word Cloud - by province
+```{r}
+
+library(RColorBrewer)
+library(wordcloud)
+pallette = brewer.pal(8, "Dark2")
+wine<- read_rds("~/Desktop/Data Analysis/Machine Learning/Data/pinot.rds") %>% 
+  select(-taster_name) %>% mutate(id=row_number())# no leakage
+cat("word clouds are in the following order:
+      Burgundy,
+      California,
+      CB valley,
+      Marlborough,
+      Oregon, 
+      New York")
+for (data in c("Burgundy", "California", "Casablanca_Valley", "Marlborough", "Oregon", "New_York")) 
+  {
+  
+
+    province_data = wine %>% filter(province == data)
+    name = wine_words(province_data, 25, F) %>% select(-c(province, id))
+  
+    num = length(names(name))
+  
+    cloud<- pivot_longer(name, cols = 1:num, names_to = "word", values_to = "freq")%>%
+    mutate(freq = ifelse(freq == "TRUE", 1,0))%>% group_by(word)%>%summarise(freq = sum(freq))%>% arrange(desc(freq))%>% head(25) %>% tail(15)
+  
+  
+    wordcloud(cloud$word, cloud$freq, scale = c(3.5, 0.5), colors = pallette)
+    
+    
+   }
+
+
+```
+
+## getting words from word cloud
+```{r}
+wino = wine
+# NY
+province_data = wino %>% filter(province == "New_York")
+name = wine_words(province_data, 5, F) %>% select(-c(province, id))
+  
+num = length(names(name))
+  
+cloud<- pivot_longer(name, cols = 1:num, names_to = "word", values_to = "freq")%>%
+mutate(freq = ifelse(freq == "TRUE", 1,0))%>% group_by(word)%>%summarise(freq = sum(freq))%>% arrange(desc(freq))%>% head(50)
+
+NY_top_15 = cloud$word
+
+#CBV
+province_data = wino %>% filter(province == "Casablanca_Valley")
+name = wine_words(province_data, 5, F) %>% select(-c(province, id))
+  
+num = length(names(name))
+  
+cloud<- pivot_longer(name, cols = 1:num, names_to = "word", values_to = "freq")%>%
+mutate(freq = ifelse(freq == "TRUE", 1,0))%>% group_by(word)%>%summarise(freq = sum(freq))%>% arrange(desc(freq))%>% head(50) 
+
+CBV_top_15 = cloud$word
+#Oregon
+province_data = wino %>% filter(province == "Oregon")
+name = wine_words(province_data, 25, F) %>% select(-c(province, id))
+  
+num = length(names(name))
+  
+cloud<- pivot_longer(name, cols = 1:num, names_to = "word", values_to = "freq")%>%
+mutate(freq = ifelse(freq == "TRUE", 1,0))%>% group_by(word)%>%summarise(freq = sum(freq))%>% arrange(desc(freq))%>% head(5) 
+
+OR_top_15 = cloud$word
+
+#California
+province_data = wino %>% filter(province == "California")
+name = wine_words(province_data, 25, F) %>% select(-c(province, id))
+  
+num = length(names(name))
+  
+cloud<- pivot_longer(name, cols = 1:num, names_to = "word", values_to = "freq")%>%
+mutate(freq = ifelse(freq == "TRUE", 1,0))%>% group_by(word)%>%summarise(freq = sum(freq))%>% arrange(desc(freq))%>% head(5)
+
+CA_top_15 = cloud$word
+
+
+#Marlborough
+province_data = wino %>% filter(province == "Marlborough")
+name = wine_words(province_data, 5, F) %>% select(-c(province, id))
+  
+num = length(names(name))
+  
+cloud<- pivot_longer(name, cols = 1:num, names_to = "word", values_to = "freq")%>%
+mutate(freq = ifelse(freq == "TRUE", 1,0))%>% group_by(word)%>%summarise(freq = sum(freq))%>% arrange(desc(freq))%>% head(50)
+
+MA_top_15 = cloud$word
+#Burgundy
+province_data = wino %>% filter(province == "Burgundy")
+name = wine_words(province_data, 25, F) %>% select(-c(province, id))
+  
+num = length(names(name))
+  
+cloud<- pivot_longer(name, cols = 1:num, names_to = "word", values_to = "freq")%>%
+mutate(freq = ifelse(freq == "TRUE", 1,0))%>% group_by(word)%>%summarise(freq = sum(freq))%>% arrange(desc(freq))%>% head(5)
+
+BUR_top_15 = cloud$word
+
+```
+
+## adding word cloud words into data set
+```{r}
+
+bur = paste(BUR_top_15, collapse = '|')
+ny = paste(NY_top_15, collapse = '|')
+mar = paste(MA_top_15, collapse = '|')
+or = paste(OR_top_15, collapse = '|')
+ca = paste(CA_top_15, collapse = '|')
+cbv = paste(CBV_top_15, collapse = '|')
+
+
+wino_test = wino %>% mutate(bur = ifelse(grepl(bur, description),1,0),
+                            ny = ifelse(grepl(ny, description),1,0),
+                            mar = ifelse(grepl(mar, description),1,0),
+                            or = ifelse(grepl(or, description),1,0),
+                            ca = ifelse(grepl(ca, description),1,0),
+                            cbv = ifelse(grepl(cbv, description),1,0)) %>%
+  mutate(year_f = as.factor(year)) %>%
+  dummy_cols(
+select_columns = c("year_f"),
+remove_most_frequent_dummy = T,
+remove_selected_columns = T) %>%
+  mutate(new_price = price,new_points=points)
+  
+wino_test$new_price <- as.numeric(cut_number(wino_test$new_price,10))#Binning price to 10 equal groups
+
+wino_test$new_points <- as.numeric(cut_number(wino_test$new_points,10))#Binning points to 10 equal groups
+
+#Making dummies of those new factors
+wino_test<-wino_test%>%
+  mutate(new_points = as.factor(new_points)) %>%
+  dummy_cols(
+    select_columns = c("new_points"),
+    remove_most_frequent_dummy = T,
+    remove_selected_columns = T)
+
+wino_test<-wino_test%>%
+  mutate(new_price = as.factor(new_price)) %>%
+  dummy_cols(
+    select_columns = c("new_price"),
+    remove_most_frequent_dummy = T,
+    remove_selected_columns = T) 
+
+wino_test<-wino_test %>% select(-c(price, points, year, id, description))
+wino_test$province = as.factor(wino_test$province)
+  
+
+rm(list = c("NY_top_15", "CA_top_15", "OR_top_15", "CBV_top_15", "MA_top_15", "BUR_top_15", "bur", "ca", "or", "cbv", "mar", "num", "ny", "data"))
+
+```
+
+
+# model with word cloud words
+```{r}
+## split the data
+wine_index <- createDataPartition(wino_test$province, p = 0.7, list = FALSE)
+train <- wino_test[wine_index, ]
+test <- wino_test[-wine_index, ]
+
+control <-trainControl(method = "boot")
+
+
+## tuning parameters - KNN model w/ weights
+set.seed(32)
+fit <-train(province~.,
+            data = train,
+            method = "knn")
+
+confusionMatrix(predict(fit, test),factor(test$province))
+# Accuracy: 57%
+# Kappa : .286
+
+# this model performs worse in every statistic compared to the kitchen sink model. More analysis needs to be done to better prediction of underrepresented provinces.
+
+```
+
